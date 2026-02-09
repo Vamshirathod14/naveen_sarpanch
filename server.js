@@ -3,31 +3,11 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
-const streamifier = require('streamifier');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-/* =======================
-   ✅ CLOUDINARY CONFIG
-   ======================= */
-console.log('🔧 Checking Cloudinary configuration...');
-console.log('Cloud Name:', process.env.CLOUDINARY_CLOUD_NAME ? '✅ Set' : '❌ Missing');
-console.log('API Key:', process.env.CLOUDINARY_API_KEY ? '✅ Set' : '❌ Missing');
-console.log('API Secret:', process.env.CLOUDINARY_API_SECRET ? '✅ Set' : '❌ Missing');
-
-try {
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-    secure: true
-  });
-  console.log('✅ Cloudinary configured successfully');
-} catch (error) {
-  console.error('❌ Cloudinary configuration error:', error.message);
-}
 
 /* =======================
    ✅ MIDDLEWARE
@@ -41,42 +21,54 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 /* =======================
-   ✅ MULTER MEMORY STORAGE
+   ✅ MULTER CONFIGURATION (LOCAL STORAGE - TEMPORARY)
    ======================= */
-const storage = multer.memoryStorage();
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = 'uploads/complaints';
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, 'image-' + uniqueSuffix + ext);
+  }
+});
+
 const upload = multer({
   storage: storage,
   limits: { 
-    fileSize: 50 * 1024 * 1024, // 50MB limit for high-quality photos
+    fileSize: 50 * 1024 * 1024, // 50MB
     files: 1
   },
   fileFilter: (req, file, cb) => {
-    console.log('📁 File upload attempt:', {
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-      size: file.size
-    });
-
-    // ACCEPT ALL IMAGE TYPES including iPhone HEIC
+    // ACCEPT ALL IMAGE TYPES
     const allowedMimes = [
       'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
       'image/webp', 'image/heic', 'image/heif', 'image/avif',
       'image/tiff', 'image/bmp', 'image/svg+xml'
     ];
     
-    // Also check by extension for files without proper MIME type
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', 
-                              '.heic', '.heif', '.avif', '.tiff', '.tif', 
-                              '.bmp', '.svg'];
-    
-    const fileExt = file.originalname.toLowerCase().slice(file.originalname.lastIndexOf('.'));
-    
-    if (allowedMimes.includes(file.mimetype) || allowedExtensions.includes(fileExt)) {
+    if (allowedMimes.includes(file.mimetype)) {
       console.log('✅ Accepting file:', file.originalname);
       cb(null, true);
     } else {
-      console.log('❌ Rejecting file:', file.originalname, 'MIME:', file.mimetype, 'Ext:', fileExt);
-      cb(new Error('Invalid file type. Only images are allowed.'));
+      // Also check by extension
+      const ext = path.extname(file.originalname).toLowerCase();
+      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', 
+                                '.heic', '.heif', '.avif', '.tiff', '.tif', 
+                                '.bmp', '.svg'];
+      
+      if (allowedExtensions.includes(ext)) {
+        console.log('✅ Accepting file by extension:', file.originalname);
+        cb(null, true);
+      } else {
+        console.log('❌ Rejecting file:', file.originalname);
+        cb(new Error('Invalid file type. Only images are allowed.'));
+      }
     }
   }
 });
@@ -98,52 +90,6 @@ const handleMulterError = (err, req, res, next) => {
 };
 
 /* =======================
-   ✅ CLOUDINARY UPLOAD FUNCTION
-   ======================= */
-const uploadToCloudinary = (fileBuffer, fileName, folder = 'sarpanch-complaints') => {
-  return new Promise((resolve, reject) => {
-    console.log('☁️ Uploading to Cloudinary:', {
-      fileName: fileName,
-      folder: folder,
-      bufferSize: fileBuffer.length
-    });
-
-    // Generate unique filename
-    const uniqueFileName = `${folder}/${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    
-    const uploadStream = cloudinary.uploader.upload_stream(
-      {
-        folder: folder,
-        public_id: uniqueFileName,
-        resource_type: 'auto', // Auto-detect image type
-        allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif', 'tiff', 'bmp', 'svg'],
-        transformation: [
-          { quality: 'auto', fetch_format: 'auto' },
-          { width: 1920, crop: 'limit' } // Limit max width
-        ],
-        timeout: 60000 // 60 seconds timeout
-      },
-      (error, result) => {
-        if (error) {
-          console.error('❌ Cloudinary upload error:', error.message);
-          reject(new Error(`Cloudinary upload failed: ${error.message}`));
-        } else {
-          console.log('✅ Cloudinary upload successful:', {
-            url: result.secure_url,
-            public_id: result.public_id,
-            format: result.format,
-            bytes: result.bytes
-          });
-          resolve(result);
-        }
-      }
-    );
-
-    streamifier.createReadStream(fileBuffer).pipe(uploadStream);
-  });
-};
-
-/* =======================
    ✅ SCHEMAS & MODELS
    ======================= */
 const activitySchema = new mongoose.Schema({
@@ -162,10 +108,8 @@ const complaintSchema = new mongoose.Schema({
     enum: ['pending', 'in-progress', 'completed'],
     default: 'pending'
   },
-  imageBefore: String, // Cloudinary URL
-  imageAfter: String,  // Cloudinary URL
-  cloudinaryIdBefore: String, // Store Cloudinary public_id
-  cloudinaryIdAfter: String,  // Store Cloudinary public_id
+  imageBefore: String, // Local path or Cloudinary URL
+  imageAfter: String,  // Local path or Cloudinary URL
   imageType: { type: String, default: 'image/jpeg' },
   fileSize: Number,
   resolvedAt: Date,
@@ -185,24 +129,29 @@ mongoose.connect(process.env.MONGODB_URI, {
 .then(() => console.log('✅ MongoDB Connected'))
 .catch(err => {
   console.error('❌ MongoDB Error:', err.message);
-  console.log('⚠️ Server will continue but database operations will fail');
 });
+
+/* =======================
+   ✅ SERVE UPLOADED FILES
+   ======================= */
+app.use('/uploads', express.static('uploads'));
 
 /* =======================
    ✅ HEALTH CHECK
    ======================= */
 app.get('/', (req, res) => {
   res.json({ 
-    message: '🚀 Naveen Seva Mitra Backend Running with Cloudinary!',
+    message: '🚀 Naveen Seva Mitra Backend Running!',
     status: 'active',
-    cloudinary: process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured',
+    storage: 'local',
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     endpoints: {
       complaints: '/api/complaints',
       'complaints-with-image': '/api/complaints-with-image',
       activities: '/api/activities',
       'complaints-with-images': '/api/complaints-with-images',
-      'complaints-stats': '/api/complaints-stats'
+      'complaints-stats': '/api/complaints-stats',
+      'test-upload': '/api/test-upload'
     }
   });
 });
@@ -243,11 +192,12 @@ app.post('/api/complaints', async (req, res) => {
 app.post('/api/complaints-with-image', upload.single('image'), handleMulterError, async (req, res) => {
   try {
     console.log('📸 Creating complaint with image...');
-    console.log('Request body fields:', req.body);
-    console.log('File info:', req.file ? {
+    console.log('Body fields:', req.body);
+    console.log('File:', req.file ? {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
-      size: req.file.size
+      size: req.file.size,
+      filename: req.file.filename
     } : 'No file');
     
     const { phoneNumber, category, description, location, status } = req.body;
@@ -262,24 +212,13 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
       return res.status(400).json({ message: 'No image file uploaded' });
     }
 
-    // Upload to Cloudinary
-    const fileName = req.file.originalname;
-    const cloudinaryResult = await uploadToCloudinary(
-      req.file.buffer, 
-      fileName,
-      'sarpanch-complaints/before'
-    );
-
-    console.log('✅ Cloudinary upload successful');
-
     const complaint = new Complaint({
       phoneNumber,
       category,
       description,
       location: location || '',
       status: status || 'pending',
-      imageBefore: cloudinaryResult.secure_url,
-      cloudinaryIdBefore: cloudinaryResult.public_id,
+      imageBefore: `/uploads/complaints/${req.file.filename}`,
       imageType: req.file.mimetype,
       fileSize: req.file.size,
     });
@@ -291,7 +230,7 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
   } catch (error) {
     console.error('❌ Complaint with image error:', error);
     res.status(500).json({ 
-      message: 'Failed to upload image to Cloudinary',
+      message: 'Failed to upload image',
       error: error.message
     });
   }
@@ -301,7 +240,7 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
 app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMulterError, async (req, res) => {
   try {
     console.log('📸 Admin uploading BEFORE image for complaint:', req.params.id);
-    console.log('File info:', req.file ? {
+    console.log('File:', req.file ? {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
       size: req.file.size
@@ -316,17 +255,16 @@ app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMult
       return res.status(404).json({ message: 'Complaint not found' });
     }
 
-    // Upload to Cloudinary
-    const fileName = `before_${Date.now()}_${complaint._id}`;
-    const cloudinaryResult = await uploadToCloudinary(
-      req.file.buffer, 
-      fileName,
-      'sarpanch-complaints/before'
-    );
+    // Delete old image if exists
+    if (complaint.imageBefore) {
+      const oldImagePath = path.join(__dirname, complaint.imageBefore);
+      if (fs.existsSync(oldImagePath)) {
+        fs.unlinkSync(oldImagePath);
+      }
+    }
 
     // Update complaint
-    complaint.imageBefore = cloudinaryResult.secure_url;
-    complaint.cloudinaryIdBefore = cloudinaryResult.public_id;
+    complaint.imageBefore = `/uploads/complaints/${req.file.filename}`;
     complaint.imageType = req.file.mimetype;
     complaint.fileSize = req.file.size;
     
@@ -347,7 +285,7 @@ app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMult
 app.post('/api/complaints/:id/upload-after', upload.single('image'), handleMulterError, async (req, res) => {
   try {
     console.log('📸 Admin uploading AFTER image for complaint:', req.params.id);
-    console.log('File info:', req.file ? {
+    console.log('File:', req.file ? {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
       size: req.file.size
@@ -362,17 +300,16 @@ app.post('/api/complaints/:id/upload-after', upload.single('image'), handleMulte
       return res.status(404).json({ message: 'Complaint not found' });
     }
 
-    // Upload to Cloudinary
-    const fileName = `after_${Date.now()}_${complaint._id}`;
-    const cloudinaryResult = await uploadToCloudinary(
-      req.file.buffer, 
-      fileName,
-      'sarpanch-complaints/after'
-    );
+    // Delete old image if exists
+    if (complaint.imageAfter) {
+      const oldImagePath = path.join(__dirname, complaint.imageAfter);
+      if (fs.existsSync(oldImagePath)) {
+        fs.unlinkSync(oldImagePath);
+      }
+    }
 
     // Update complaint
-    complaint.imageAfter = cloudinaryResult.secure_url;
-    complaint.cloudinaryIdAfter = cloudinaryResult.public_id;
+    complaint.imageAfter = `/uploads/complaints/${req.file.filename}`;
     complaint.status = 'completed';
     complaint.resolvedAt = new Date();
     complaint.imageType = req.file.mimetype;
@@ -483,50 +420,6 @@ app.put('/api/complaints/:id/status', async (req, res) => {
 });
 
 /* =======================
-   ✅ ACTIVITY ROUTES
-   ======================= */
-app.get('/api/activities', async (req, res) => {
-  try {
-    const activities = await Activity.find().sort({ date: -1 });
-    res.json(activities);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-app.post('/api/activities', async (req, res) => {
-  try {
-    const activity = new Activity(req.body);
-    const savedActivity = await activity.save();
-    res.status(201).json(savedActivity);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-});
-
-app.put('/api/activities/:id', async (req, res) => {
-  try {
-    const updatedActivity = await Activity.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true }
-    );
-    res.json(updatedActivity);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-});
-
-app.delete('/api/activities/:id', async (req, res) => {
-  try {
-    await Activity.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Activity deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-/* =======================
    ✅ TEST ENDPOINT for debugging
    ======================= */
 app.post('/api/test-upload', upload.single('image'), handleMulterError, async (req, res) => {
@@ -541,9 +434,10 @@ app.post('/api/test-upload', upload.single('image'), handleMulterError, async (r
       file: {
         originalname: req.file.originalname,
         mimetype: req.file.mimetype,
-        size: req.file.size
-      },
-      cloudinaryConfigured: !!process.env.CLOUDINARY_CLOUD_NAME
+        size: req.file.size,
+        filename: req.file.filename,
+        path: `/uploads/complaints/${req.file.filename}`
+      }
     });
   } catch (error) {
     console.error('Test upload error:', error);
@@ -576,6 +470,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📝 API available at: http://localhost:${PORT}/api`);
-  console.log(`☁️  Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`📁 Local storage: Enabled`);
   console.log(`🗄️  Database: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
 });
