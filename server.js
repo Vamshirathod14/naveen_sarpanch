@@ -21,7 +21,7 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 /* =======================
-   ✅ MULTER CONFIGURATION (LOCAL STORAGE - TEMPORARY)
+   ✅ MULTER CONFIGURATION (LOCAL STORAGE)
    ======================= */
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -108,8 +108,8 @@ const complaintSchema = new mongoose.Schema({
     enum: ['pending', 'in-progress', 'completed'],
     default: 'pending'
   },
-  imageBefore: String, // Local path or Cloudinary URL
-  imageAfter: String,  // Local path or Cloudinary URL
+  imageBefore: String, // Local path
+  imageAfter: String,  // Local path
   imageType: { type: String, default: 'image/jpeg' },
   fileSize: Number,
   resolvedAt: Date,
@@ -154,6 +154,95 @@ app.get('/', (req, res) => {
       'test-upload': '/api/test-upload'
     }
   });
+});
+
+/* =======================
+   ✅ ACTIVITY ROUTES (FOR ADMIN PANEL)
+   ======================= */
+
+// ✅ Get all activities
+app.get('/api/activities', async (req, res) => {
+  try {
+    const activities = await Activity.find().sort({ date: -1 });
+    res.json(activities);
+  } catch (error) {
+    console.error('❌ Get activities error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ✅ Create new activity
+app.post('/api/activities', async (req, res) => {
+  try {
+    console.log('📝 Creating activity:', req.body);
+    
+    const { title, description } = req.body;
+
+    if (!title || !description) {
+      return res.status(400).json({ message: 'Title and description are required' });
+    }
+
+    const activity = new Activity({
+      title,
+      description,
+      date: new Date()
+    });
+
+    const savedActivity = await activity.save();
+    console.log('✅ Activity saved:', savedActivity._id);
+    res.status(201).json(savedActivity);
+  } catch (error) {
+    console.error('❌ Create activity error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ✅ Update activity
+app.put('/api/activities/:id', async (req, res) => {
+  try {
+    console.log('📝 Updating activity:', req.params.id, req.body);
+    
+    const { title, description } = req.body;
+
+    if (!title || !description) {
+      return res.status(400).json({ message: 'Title and description are required' });
+    }
+
+    const updatedActivity = await Activity.findByIdAndUpdate(
+      req.params.id,
+      { title, description },
+      { new: true }
+    );
+
+    if (!updatedActivity) {
+      return res.status(404).json({ message: 'Activity not found' });
+    }
+
+    console.log('✅ Activity updated:', updatedActivity._id);
+    res.json(updatedActivity);
+  } catch (error) {
+    console.error('❌ Update activity error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ✅ Delete activity
+app.delete('/api/activities/:id', async (req, res) => {
+  try {
+    console.log('🗑️ Deleting activity:', req.params.id);
+    
+    const deletedActivity = await Activity.findByIdAndDelete(req.params.id);
+
+    if (!deletedActivity) {
+      return res.status(404).json({ message: 'Activity not found' });
+    }
+
+    console.log('✅ Activity deleted:', req.params.id);
+    res.json({ message: 'Activity deleted successfully' });
+  } catch (error) {
+    console.error('❌ Delete activity error:', error);
+    res.status(500).json({ message: error.message });
+  }
 });
 
 /* =======================
@@ -472,4 +561,11 @@ app.listen(PORT, () => {
   console.log(`📝 API available at: http://localhost:${PORT}/api`);
   console.log(`📁 Local storage: Enabled`);
   console.log(`🗄️  Database: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
+  console.log(`📊 Endpoints:`);
+  console.log(`   - GET /api/activities`);
+  console.log(`   - POST /api/activities`);
+  console.log(`   - PUT /api/activities/:id`);
+  console.log(`   - DELETE /api/activities/:id`);
+  console.log(`   - GET /api/complaints`);
+  console.log(`   - POST /api/complaints-with-image`);
 });
