@@ -3,14 +3,24 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
+const streamifier = require('streamifier');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 /* =======================
-   ✅ MIDDLEWARE (FIXED)
+   ✅ CLOUDINARY CONFIG
+   ======================= */
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true
+});
+
+/* =======================
+   ✅ MIDDLEWARE
    ======================= */
 app.use(cors({
   origin: '*'
@@ -19,66 +29,30 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 /* =======================
-   ✅ MULTER CONFIGURATION (ACCEPT ALL IMAGES)
+   ✅ MULTER MEMORY STORAGE (No local files)
    ======================= */
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = 'uploads/complaints';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const originalName = path.parse(file.originalname).name;
-    const extension = path.extname(file.originalname).toLowerCase();
-    cb(null, 'image-' + uniqueSuffix + extension);
-  }
-});
-
+const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: { 
-    fileSize: 20 * 1024 * 1024, // 20MB limit for high-quality iPhone photos
+    fileSize: 20 * 1024 * 1024, // 20MB
     files: 1
   },
   fileFilter: (req, file, cb) => {
-    // Accept all image types including HEIC from iPhone
     const allowedMimes = [
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'image/gif',
-      'image/webp',
-      'image/heic',
-      'image/heif',
-      'image/avif',
-      'image/tiff',
-      'image/bmp',
-      'image/svg+xml'
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
+      'image/webp', 'image/heic', 'image/heif', 'image/avif',
+      'image/tiff', 'image/bmp'
     ];
     
-    // Also check by file extension
-    const allowedExtensions = [
-      '.jpg', '.jpeg', '.png', '.gif', '.webp', 
-      '.heic', '.heif', '.avif', '.tiff', '.tif', 
-      '.bmp', '.svg'
-    ];
-    
-    const fileExtension = path.extname(file.originalname).toLowerCase();
-    
-    if (allowedMimes.includes(file.mimetype) || allowedExtensions.includes(fileExtension)) {
-      console.log(`✅ Accepting file: ${file.originalname}, MIME: ${file.mimetype}, Extension: ${fileExtension}`);
-      return cb(null, true);
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
     } else {
-      console.log(`❌ Rejecting file: ${file.originalname}, MIME: ${file.mimetype}, Extension: ${fileExtension}`);
-      return cb(new Error(`File type not allowed. Please upload an image file.`));
+      cb(new Error('Invalid file type. Only images are allowed.'));
     }
   }
 });
 
-// Error handling for multer
 const handleMulterError = (err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
@@ -86,16 +60,39 @@ const handleMulterError = (err, req, res, next) => {
         message: 'File size is too large. Maximum size is 20MB.' 
       });
     }
-    if (err.code === 'LIMIT_FILE_COUNT') {
-      return res.status(400).json({ 
-        message: 'Too many files. Maximum 1 file allowed.' 
-      });
-    }
     return res.status(400).json({ message: err.message });
   } else if (err) {
     return res.status(400).json({ message: err.message });
   }
   next();
+};
+
+/* =======================
+   ✅ CLOUDINARY UPLOAD FUNCTION
+   ======================= */
+const uploadToCloudinary = (fileBuffer, fileName, folder = 'sarpanch-complaints') => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: folder,
+        public_id: fileName.replace(/\.[^/.]+$/, ""), // Remove extension
+        resource_type: 'auto', // Auto-detect image type
+        transformation: [
+          { quality: 'auto', fetch_format: 'auto' }, // Auto-optimize
+          { width: 1920, crop: 'limit' } // Limit max width
+        ]
+      },
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      }
+    );
+
+    streamifier.createReadStream(fileBuffer).pipe(uploadStream);
+  });
 };
 
 /* =======================
@@ -117,8 +114,10 @@ const complaintSchema = new mongoose.Schema({
     enum: ['pending', 'in-progress', 'completed'],
     default: 'pending'
   },
-  imageBefore: String,
-  imageAfter: String,
+  imageBefore: String, // Cloudinary URL
+  imageAfter: String,  // Cloudinary URL
+  cloudinaryIdBefore: String, // Store Cloudinary public_id
+  cloudinaryIdAfter: String,  // Store Cloudinary public_id
   imageType: { type: String, default: 'image/jpeg' },
   fileSize: Number,
   resolvedAt: Date,
@@ -138,21 +137,17 @@ mongoose.connect(process.env.MONGODB_URI, {
 .catch(err => console.error('❌ MongoDB Error:', err));
 
 /* =======================
-   ✅ SERVE UPLOADED FILES
-   ======================= */
-app.use('/uploads', express.static('uploads'));
-
-/* =======================
    ✅ HEALTH CHECK
    ======================= */
 app.get('/', (req, res) => {
   res.json({ 
-    message: '🚀 Naveen Seva Mitra Backend Running!',
+    message: '🚀 Naveen Seva Mitra Backend Running with Cloudinary!',
     endpoints: {
       complaints: '/api/complaints',
       'complaints-with-image': '/api/complaints-with-image',
       activities: '/api/activities',
-      uploads: '/uploads'
+      'complaints-with-images': '/api/complaints-with-images',
+      'complaints-stats': '/api/complaints-stats'
     }
   });
 });
@@ -161,7 +156,7 @@ app.get('/', (req, res) => {
    ✅ COMPLAINT ROUTES
    ======================= */
 
-// ✅ Create complaint WITHOUT image (for regular submission)
+// ✅ Create complaint WITHOUT image
 app.post('/api/complaints', async (req, res) => {
   try {
     console.log('📝 Creating complaint without image:', req.body);
@@ -189,32 +184,32 @@ app.post('/api/complaints', async (req, res) => {
   }
 });
 
-// ✅ Create complaint WITH image (for Flutter app with image upload)
+// ✅ Create complaint WITH image (Flutter app upload)
 app.post('/api/complaints-with-image', upload.single('image'), handleMulterError, async (req, res) => {
   try {
     console.log('📸 Creating complaint with image...');
-    console.log('📁 File info:', {
-      filename: req.file?.filename,
-      originalname: req.file?.originalname,
-      mimetype: req.file?.mimetype,
-      size: req.file?.size,
-      path: req.file?.path
-    });
-    console.log('📝 Body fields:', req.body);
     
     const { phoneNumber, category, description, location, status } = req.body;
 
     if (!phoneNumber || !category || !description) {
-      // Delete uploaded file if validation fails
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
-      return res.status(400).json({ message: 'Missing required fields: phoneNumber, category, description' });
+      return res.status(400).json({ 
+        message: 'Missing required fields: phoneNumber, category, description' 
+      });
     }
 
     if (!req.file) {
       return res.status(400).json({ message: 'No image file uploaded' });
     }
+
+    // Upload to Cloudinary
+    const fileName = `complaint_${Date.now()}_${req.file.originalname}`;
+    const cloudinaryResult = await uploadToCloudinary(
+      req.file.buffer, 
+      fileName,
+      'sarpanch-complaints/before'
+    );
+
+    console.log('✅ Cloudinary upload successful:', cloudinaryResult.secure_url);
 
     const complaint = new Complaint({
       phoneNumber,
@@ -222,27 +217,18 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
       description,
       location: location || '',
       status: status || 'pending',
-      imageBefore: `/uploads/complaints/${req.file.filename}`,
+      imageBefore: cloudinaryResult.secure_url,
+      cloudinaryIdBefore: cloudinaryResult.public_id,
       imageType: req.file.mimetype,
       fileSize: req.file.size,
     });
 
     const savedComplaint = await complaint.save();
-    console.log('✅ Complaint with image saved:', {
-      id: savedComplaint._id,
-      image: savedComplaint.imageBefore,
-      type: savedComplaint.imageType,
-      size: savedComplaint.fileSize
-    });
+    console.log('✅ Complaint with image saved:', savedComplaint._id);
+    
     res.status(201).json(savedComplaint);
   } catch (error) {
     console.error('❌ Complaint with image error:', error);
-    
-    // Delete uploaded file if save fails
-    if (req.file) {
-      fs.unlinkSync(req.file.path);
-    }
-    
     res.status(500).json({ 
       message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -250,7 +236,99 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
   }
 });
 
-// ✅ Get all complaints (for admin panel)
+// ✅ Upload before image (Admin Panel)
+app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMulterError, async (req, res) => {
+  try {
+    const complaint = await Complaint.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ message: 'Complaint not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file uploaded' });
+    }
+
+    // Delete old image from Cloudinary if exists
+    if (complaint.cloudinaryIdBefore) {
+      try {
+        await cloudinary.uploader.destroy(complaint.cloudinaryIdBefore);
+        console.log('🗑️ Deleted old before image from Cloudinary');
+      } catch (deleteError) {
+        console.warn('⚠️ Could not delete old image:', deleteError.message);
+      }
+    }
+
+    // Upload new image to Cloudinary
+    const fileName = `before_${Date.now()}_${complaint._id}`;
+    const cloudinaryResult = await uploadToCloudinary(
+      req.file.buffer, 
+      fileName,
+      'sarpanch-complaints/before'
+    );
+
+    // Update complaint
+    complaint.imageBefore = cloudinaryResult.secure_url;
+    complaint.cloudinaryIdBefore = cloudinaryResult.public_id;
+    complaint.imageType = req.file.mimetype;
+    complaint.fileSize = req.file.size;
+    
+    const updatedComplaint = await complaint.save();
+    
+    res.json(updatedComplaint);
+  } catch (error) {
+    console.error('❌ Before image upload error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ✅ Upload after image (Admin Panel)
+app.post('/api/complaints/:id/upload-after', upload.single('image'), handleMulterError, async (req, res) => {
+  try {
+    const complaint = await Complaint.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ message: 'Complaint not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file uploaded' });
+    }
+
+    // Delete old image from Cloudinary if exists
+    if (complaint.cloudinaryIdAfter) {
+      try {
+        await cloudinary.uploader.destroy(complaint.cloudinaryIdAfter);
+        console.log('🗑️ Deleted old after image from Cloudinary');
+      } catch (deleteError) {
+        console.warn('⚠️ Could not delete old image:', deleteError.message);
+      }
+    }
+
+    // Upload new image to Cloudinary
+    const fileName = `after_${Date.now()}_${complaint._id}`;
+    const cloudinaryResult = await uploadToCloudinary(
+      req.file.buffer, 
+      fileName,
+      'sarpanch-complaints/after'
+    );
+
+    // Update complaint
+    complaint.imageAfter = cloudinaryResult.secure_url;
+    complaint.cloudinaryIdAfter = cloudinaryResult.public_id;
+    complaint.status = 'completed';
+    complaint.resolvedAt = new Date();
+    complaint.imageType = req.file.mimetype;
+    complaint.fileSize = req.file.size;
+    
+    const updatedComplaint = await complaint.save();
+    
+    res.json(updatedComplaint);
+  } catch (error) {
+    console.error('❌ After image upload error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ✅ Get all complaints
 app.get('/api/complaints', async (req, res) => {
   try {
     const complaints = await Complaint.find().sort({ createdAt: -1 });
@@ -270,7 +348,7 @@ app.get('/api/complaints/phone/:phoneNumber', async (req, res) => {
   }
 });
 
-// ✅ Get complaints with images (for before/after gallery)
+// ✅ Get complaints with images
 app.get('/api/complaints-with-images', async (req, res) => {
   try {
     const complaints = await Complaint.find({
@@ -289,7 +367,7 @@ app.get('/api/complaints-with-images', async (req, res) => {
   }
 });
 
-// ✅ Get all complaints statistics (for analytics)
+// ✅ Get complaints statistics
 app.get('/api/complaints-stats', async (req, res) => {
   try {
     const totalComplaints = await Complaint.countDocuments();
@@ -315,80 +393,11 @@ app.get('/api/complaints-stats', async (req, res) => {
   }
 });
 
-// ✅ Upload before image (admin panel)
-app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMulterError, async (req, res) => {
-  try {
-    const complaint = await Complaint.findById(req.params.id);
-    if (!complaint) {
-      return res.status(404).json({ message: 'Complaint not found' });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ message: 'No image file uploaded' });
-    }
-
-    // Delete old image if exists
-    if (complaint.imageBefore) {
-      const oldImagePath = path.join(__dirname, complaint.imageBefore);
-      if (fs.existsSync(oldImagePath)) {
-        fs.unlinkSync(oldImagePath);
-      }
-    }
-
-    complaint.imageBefore = `/uploads/complaints/${req.file.filename}`;
-    complaint.imageType = req.file.mimetype;
-    complaint.fileSize = req.file.size;
-    
-    const updatedComplaint = await complaint.save();
-    
-    res.json(updatedComplaint);
-  } catch (error) {
-    console.error('❌ Before image upload error:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// ✅ Upload after image (admin panel)
-app.post('/api/complaints/:id/upload-after', upload.single('image'), handleMulterError, async (req, res) => {
-  try {
-    const complaint = await Complaint.findById(req.params.id);
-    if (!complaint) {
-      return res.status(404).json({ message: 'Complaint not found' });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ message: 'No image file uploaded' });
-    }
-
-    // Delete old image if exists
-    if (complaint.imageAfter) {
-      const oldImagePath = path.join(__dirname, complaint.imageAfter);
-      if (fs.existsSync(oldImagePath)) {
-        fs.unlinkSync(oldImagePath);
-      }
-    }
-
-    complaint.imageAfter = `/uploads/complaints/${req.file.filename}`;
-    complaint.status = 'completed';
-    complaint.resolvedAt = new Date();
-    complaint.imageType = req.file.mimetype;
-    complaint.fileSize = req.file.size;
-    
-    const updatedComplaint = await complaint.save();
-    
-    res.json(updatedComplaint);
-  } catch (error) {
-    console.error('❌ After image upload error:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
 // ✅ Update complaint status
 app.put('/api/complaints/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
     
-    // If status is being changed to completed, set resolvedAt
     const updateData = { status };
     if (status === 'completed') {
       updateData.resolvedAt = new Date();
@@ -411,7 +420,7 @@ app.put('/api/complaints/:id/status', async (req, res) => {
 });
 
 /* =======================
-   ✅ ACTIVITY ROUTES
+   ✅ ACTIVITY ROUTES (Unchanged)
    ======================= */
 app.get('/api/activities', async (req, res) => {
   try {
@@ -455,15 +464,12 @@ app.delete('/api/activities/:id', async (req, res) => {
 });
 
 /* =======================
-   ✅ 404 HANDLER
+   ✅ 404 & ERROR HANDLERS
    ======================= */
 app.use((req, res) => {
   res.status(404).json({ message: `Route ${req.originalUrl} not found` });
 });
 
-/* =======================
-   ✅ ERROR HANDLER
-   ======================= */
 app.use((err, req, res, next) => {
   console.error('❌ Server Error:', err.stack);
   res.status(500).json({ 
@@ -477,7 +483,6 @@ app.use((err, req, res, next) => {
    ======================= */
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📁 Uploads served at: http://localhost:${PORT}/uploads`);
+  console.log(`☁️  Cloudinary configured for image storage`);
   console.log(`📝 API available at: http://localhost:${PORT}/api`);
-  console.log(`📊 Health check: http://localhost:${PORT}/`);
 });
