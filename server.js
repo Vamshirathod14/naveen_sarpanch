@@ -12,42 +12,70 @@ const PORT = process.env.PORT || 5000;
 /* =======================
    ✅ CLOUDINARY CONFIG
    ======================= */
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true
-});
+console.log('🔧 Checking Cloudinary configuration...');
+console.log('Cloud Name:', process.env.CLOUDINARY_CLOUD_NAME ? '✅ Set' : '❌ Missing');
+console.log('API Key:', process.env.CLOUDINARY_API_KEY ? '✅ Set' : '❌ Missing');
+console.log('API Secret:', process.env.CLOUDINARY_API_SECRET ? '✅ Set' : '❌ Missing');
+
+try {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true
+  });
+  console.log('✅ Cloudinary configured successfully');
+} catch (error) {
+  console.error('❌ Cloudinary configuration error:', error.message);
+}
 
 /* =======================
    ✅ MIDDLEWARE
    ======================= */
 app.use(cors({
-  origin: '*'
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 /* =======================
-   ✅ MULTER MEMORY STORAGE (No local files)
+   ✅ MULTER MEMORY STORAGE
    ======================= */
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: { 
-    fileSize: 20 * 1024 * 1024, // 20MB
+    fileSize: 50 * 1024 * 1024, // 50MB limit for high-quality photos
     files: 1
   },
   fileFilter: (req, file, cb) => {
+    console.log('📁 File upload attempt:', {
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    });
+
+    // ACCEPT ALL IMAGE TYPES including iPhone HEIC
     const allowedMimes = [
       'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
       'image/webp', 'image/heic', 'image/heif', 'image/avif',
-      'image/tiff', 'image/bmp'
+      'image/tiff', 'image/bmp', 'image/svg+xml'
     ];
     
-    if (allowedMimes.includes(file.mimetype)) {
+    // Also check by extension for files without proper MIME type
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', 
+                              '.heic', '.heif', '.avif', '.tiff', '.tif', 
+                              '.bmp', '.svg'];
+    
+    const fileExt = file.originalname.toLowerCase().slice(file.originalname.lastIndexOf('.'));
+    
+    if (allowedMimes.includes(file.mimetype) || allowedExtensions.includes(fileExt)) {
+      console.log('✅ Accepting file:', file.originalname);
       cb(null, true);
     } else {
+      console.log('❌ Rejecting file:', file.originalname, 'MIME:', file.mimetype, 'Ext:', fileExt);
       cb(new Error('Invalid file type. Only images are allowed.'));
     }
   }
@@ -55,13 +83,15 @@ const upload = multer({
 
 const handleMulterError = (err, req, res, next) => {
   if (err instanceof multer.MulterError) {
+    console.error('❌ Multer Error:', err.code, err.message);
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({ 
-        message: 'File size is too large. Maximum size is 20MB.' 
+        message: 'File size is too large. Maximum size is 50MB.' 
       });
     }
     return res.status(400).json({ message: err.message });
   } else if (err) {
+    console.error('❌ Upload Error:', err.message);
     return res.status(400).json({ message: err.message });
   }
   next();
@@ -72,20 +102,38 @@ const handleMulterError = (err, req, res, next) => {
    ======================= */
 const uploadToCloudinary = (fileBuffer, fileName, folder = 'sarpanch-complaints') => {
   return new Promise((resolve, reject) => {
+    console.log('☁️ Uploading to Cloudinary:', {
+      fileName: fileName,
+      folder: folder,
+      bufferSize: fileBuffer.length
+    });
+
+    // Generate unique filename
+    const uniqueFileName = `${folder}/${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder: folder,
-        public_id: fileName.replace(/\.[^/.]+$/, ""), // Remove extension
+        public_id: uniqueFileName,
         resource_type: 'auto', // Auto-detect image type
+        allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif', 'tiff', 'bmp', 'svg'],
         transformation: [
-          { quality: 'auto', fetch_format: 'auto' }, // Auto-optimize
+          { quality: 'auto', fetch_format: 'auto' },
           { width: 1920, crop: 'limit' } // Limit max width
-        ]
+        ],
+        timeout: 60000 // 60 seconds timeout
       },
       (error, result) => {
         if (error) {
-          reject(error);
+          console.error('❌ Cloudinary upload error:', error.message);
+          reject(new Error(`Cloudinary upload failed: ${error.message}`));
         } else {
+          console.log('✅ Cloudinary upload successful:', {
+            url: result.secure_url,
+            public_id: result.public_id,
+            format: result.format,
+            bytes: result.bytes
+          });
           resolve(result);
         }
       }
@@ -131,10 +179,14 @@ const Complaint = mongoose.model('Complaint', complaintSchema);
    ✅ MONGODB CONNECTION
    ======================= */
 mongoose.connect(process.env.MONGODB_URI, {
-  serverSelectionTimeoutMS: 5000
+  serverSelectionTimeoutMS: 10000,
+  socketTimeoutMS: 45000,
 })
 .then(() => console.log('✅ MongoDB Connected'))
-.catch(err => console.error('❌ MongoDB Error:', err));
+.catch(err => {
+  console.error('❌ MongoDB Error:', err.message);
+  console.log('⚠️ Server will continue but database operations will fail');
+});
 
 /* =======================
    ✅ HEALTH CHECK
@@ -142,6 +194,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 app.get('/', (req, res) => {
   res.json({ 
     message: '🚀 Naveen Seva Mitra Backend Running with Cloudinary!',
+    status: 'active',
+    cloudinary: process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'not configured',
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     endpoints: {
       complaints: '/api/complaints',
       'complaints-with-image': '/api/complaints-with-image',
@@ -188,6 +243,12 @@ app.post('/api/complaints', async (req, res) => {
 app.post('/api/complaints-with-image', upload.single('image'), handleMulterError, async (req, res) => {
   try {
     console.log('📸 Creating complaint with image...');
+    console.log('Request body fields:', req.body);
+    console.log('File info:', req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    } : 'No file');
     
     const { phoneNumber, category, description, location, status } = req.body;
 
@@ -202,14 +263,14 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
     }
 
     // Upload to Cloudinary
-    const fileName = `complaint_${Date.now()}_${req.file.originalname}`;
+    const fileName = req.file.originalname;
     const cloudinaryResult = await uploadToCloudinary(
       req.file.buffer, 
       fileName,
       'sarpanch-complaints/before'
     );
 
-    console.log('✅ Cloudinary upload successful:', cloudinaryResult.secure_url);
+    console.log('✅ Cloudinary upload successful');
 
     const complaint = new Complaint({
       phoneNumber,
@@ -230,8 +291,8 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
   } catch (error) {
     console.error('❌ Complaint with image error:', error);
     res.status(500).json({ 
-      message: 'Server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Failed to upload image to Cloudinary',
+      error: error.message
     });
   }
 });
@@ -239,26 +300,23 @@ app.post('/api/complaints-with-image', upload.single('image'), handleMulterError
 // ✅ Upload before image (Admin Panel)
 app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMulterError, async (req, res) => {
   try {
-    const complaint = await Complaint.findById(req.params.id);
-    if (!complaint) {
-      return res.status(404).json({ message: 'Complaint not found' });
-    }
+    console.log('📸 Admin uploading BEFORE image for complaint:', req.params.id);
+    console.log('File info:', req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    } : 'No file');
 
     if (!req.file) {
       return res.status(400).json({ message: 'No image file uploaded' });
     }
 
-    // Delete old image from Cloudinary if exists
-    if (complaint.cloudinaryIdBefore) {
-      try {
-        await cloudinary.uploader.destroy(complaint.cloudinaryIdBefore);
-        console.log('🗑️ Deleted old before image from Cloudinary');
-      } catch (deleteError) {
-        console.warn('⚠️ Could not delete old image:', deleteError.message);
-      }
+    const complaint = await Complaint.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ message: 'Complaint not found' });
     }
 
-    // Upload new image to Cloudinary
+    // Upload to Cloudinary
     const fileName = `before_${Date.now()}_${complaint._id}`;
     const cloudinaryResult = await uploadToCloudinary(
       req.file.buffer, 
@@ -274,36 +332,37 @@ app.post('/api/complaints/:id/upload-before', upload.single('image'), handleMult
     
     const updatedComplaint = await complaint.save();
     
+    console.log('✅ Before image uploaded successfully for complaint:', complaint._id);
     res.json(updatedComplaint);
   } catch (error) {
     console.error('❌ Before image upload error:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      message: 'Failed to upload before image',
+      error: error.message
+    });
   }
 });
 
 // ✅ Upload after image (Admin Panel)
 app.post('/api/complaints/:id/upload-after', upload.single('image'), handleMulterError, async (req, res) => {
   try {
-    const complaint = await Complaint.findById(req.params.id);
-    if (!complaint) {
-      return res.status(404).json({ message: 'Complaint not found' });
-    }
+    console.log('📸 Admin uploading AFTER image for complaint:', req.params.id);
+    console.log('File info:', req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    } : 'No file');
 
     if (!req.file) {
       return res.status(400).json({ message: 'No image file uploaded' });
     }
 
-    // Delete old image from Cloudinary if exists
-    if (complaint.cloudinaryIdAfter) {
-      try {
-        await cloudinary.uploader.destroy(complaint.cloudinaryIdAfter);
-        console.log('🗑️ Deleted old after image from Cloudinary');
-      } catch (deleteError) {
-        console.warn('⚠️ Could not delete old image:', deleteError.message);
-      }
+    const complaint = await Complaint.findById(req.params.id);
+    if (!complaint) {
+      return res.status(404).json({ message: 'Complaint not found' });
     }
 
-    // Upload new image to Cloudinary
+    // Upload to Cloudinary
     const fileName = `after_${Date.now()}_${complaint._id}`;
     const cloudinaryResult = await uploadToCloudinary(
       req.file.buffer, 
@@ -321,10 +380,14 @@ app.post('/api/complaints/:id/upload-after', upload.single('image'), handleMulte
     
     const updatedComplaint = await complaint.save();
     
+    console.log('✅ After image uploaded successfully for complaint:', complaint._id);
     res.json(updatedComplaint);
   } catch (error) {
     console.error('❌ After image upload error:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ 
+      message: 'Failed to upload after image',
+      error: error.message
+    });
   }
 });
 
@@ -420,7 +483,7 @@ app.put('/api/complaints/:id/status', async (req, res) => {
 });
 
 /* =======================
-   ✅ ACTIVITY ROUTES (Unchanged)
+   ✅ ACTIVITY ROUTES
    ======================= */
 app.get('/api/activities', async (req, res) => {
   try {
@@ -464,17 +527,46 @@ app.delete('/api/activities/:id', async (req, res) => {
 });
 
 /* =======================
+   ✅ TEST ENDPOINT for debugging
+   ======================= */
+app.post('/api/test-upload', upload.single('image'), handleMulterError, async (req, res) => {
+  try {
+    console.log('🧪 Test upload endpoint called');
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+    
+    res.json({
+      message: 'Upload successful',
+      file: {
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size
+      },
+      cloudinaryConfigured: !!process.env.CLOUDINARY_CLOUD_NAME
+    });
+  } catch (error) {
+    console.error('Test upload error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+/* =======================
    ✅ 404 & ERROR HANDLERS
    ======================= */
 app.use((req, res) => {
-  res.status(404).json({ message: `Route ${req.originalUrl} not found` });
+  console.log(`❌ 404: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ 
+    message: `Route ${req.originalUrl} not found`,
+    method: req.method
+  });
 });
 
 app.use((err, req, res, next) => {
   console.error('❌ Server Error:', err.stack);
   res.status(500).json({ 
-    message: 'Something went wrong!',
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'production' ? undefined : err.message
   });
 });
 
@@ -483,6 +575,7 @@ app.use((err, req, res, next) => {
    ======================= */
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`☁️  Cloudinary configured for image storage`);
   console.log(`📝 API available at: http://localhost:${PORT}/api`);
+  console.log(`☁️  Cloudinary: ${process.env.CLOUDINARY_CLOUD_NAME ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`🗄️  Database: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
 });
